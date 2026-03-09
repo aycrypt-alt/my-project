@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+models/best_*/
+models/deep_*/
+models/*.zip

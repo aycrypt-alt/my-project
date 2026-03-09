@@ -1,0 +1,58 @@
+{
+  "phase1_best": {
+    "feature_set": "B_trend",
+    "reward_mode": "sortino",
+    "ann_return": 0.1871,
+    "max_drawdown": -0.0081,
+    "calmar": 0.361
+  },
+  "deep_train_champion": {
+    "feature_set": "A_momentum",
+    "reward_mode": "sortino",
+    "ann_return": 24.07,
+    "max_drawdown": -0.0468,
+    "calmar": 4.312
+  },
+  "deep_train_metrics": {
+    "A_momentum": {
+      "ann_return": 249.6529,
+      "sharpe": 11.6646,
+      "sortino": 21.4642,
+      "calmar": 6096.4021,
+      "max_dd": -0.041,
+      "win_rate": 0.4729,
+      "final_capital": 13706.7146,
+      "total_return": 0.3707
+    },
+    "B_trend": {
+      "ann_return": -0.249,
+      "sharpe": -0.7654,
+      "sortino": -0.8359,
+      "calmar": -4.8087,
+      "max_dd": -0.0518,
+      "win_rate": 0.4208,
+      "final_capital": 9837.8915,
+      "total_return": -0.0162
+    },
+    "D_volume": {
+      "ann_return": -0.2387,
+      "sharpe": -0.6609,
+      "sortino": -0.6931,
+      "calmar": -4.1797,
+      "max_dd": -0.0571,
+      "win_rate": 0.4429,
+      "final_capital": 9845.5339,
+      "total_return": -0.0154
+    },
+    "F_trend_vol": {
+      "ann_return": -0.0202,
+      "sharpe": 0.1475,
+      "sortino": 0.1545,
+      "calmar": -0.2072,
+      "max_dd": -0.0973,
+      "win_rate": 0.4108,
+      "final_capital": 9988.3812,
+      "total_return": -0.0012
+    }
+  }
+}
