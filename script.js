@@ -28,7 +28,7 @@ document.getElementById('contactForm').addEventListener('submit', function(e) {
     const formData = new FormData(this);
     const name = this.querySelector('input[type="text"]').value;
     const email = this.querySelector('input[type="email"]').value;
-    const subject = this.querySelector('input[type="text"]:nth-of-type(2)').value;
+    const subject = this.querySelectorAll('input[type="text"]')[1].value;
     const message = this.querySelector('textarea').value;
     
     if (!name || !email || !subject || !message) {
