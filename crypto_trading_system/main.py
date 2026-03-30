@@ -41,6 +41,7 @@ from .core.orchestrator import Orchestrator
 from .agents.strategy.trend_following import MACrossoverAgent, MACDAgent, BreakoutAgent
 from .agents.strategy.mean_reversion import BollingerReversionAgent, RSIReversionAgent, ZScoreReversionAgent
 from .agents.strategy.momentum import ROCMomentumAgent, VolumeWeightedMomentumAgent, MultiTimeframeMomentumAgent
+from .agents.strategy.swarm_intelligence import SwarmPersonaAgent, SwarmDebateAgent, NewsInjectorAgent, PERSONAS
 
 # Analysis agents
 from .agents.analysis.market_analyzer import (
@@ -156,6 +157,20 @@ def create_strategy_agents(message_bus: MessageBus, registry: AgentRegistry, sym
 
         agent = SentimentAgent(message_bus, symbol)
         registry.register(agent, "analysis", tags=["sentiment", symbol])
+        agent_count += 1
+
+        # ── Swarm Intelligence (MiroFish-inspired) ──
+        for persona in PERSONAS:
+            agent = SwarmPersonaAgent(message_bus, symbol, persona)
+            registry.register(agent, "strategy", tags=["swarm", persona, symbol])
+            agent_count += 1
+
+        agent = SwarmDebateAgent(message_bus, symbol)
+        registry.register(agent, "strategy", tags=["swarm", "debate", symbol])
+        agent_count += 1
+
+        agent = NewsInjectorAgent(message_bus, symbol)
+        registry.register(agent, "analysis", tags=["swarm", "news", symbol])
         agent_count += 1
 
     # ── Cross-asset analysis ──
