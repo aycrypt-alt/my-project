@@ -74,6 +74,11 @@ class Orchestrator:
     SWARM_STRATEGIES = {"swarm_whale", "swarm_retail", "swarm_institutional", "swarm_quant",
                         "swarm_contrarian", "swarm_consensus"}
 
+    # Minimum net signal strength to act (filters noise trades)
+    MIN_SIGNAL_STRENGTH = 0.5
+    # Minimum agents agreeing on direction before we trade
+    MIN_CONFLUENCE_AGENTS = 3
+
     def __init__(self, message_bus: MessageBus, registry: AgentRegistry):
         self.message_bus = message_bus
         self.registry = registry
@@ -220,7 +225,7 @@ class Orchestrator:
                 # Apply regime filter before aggregation
                 signals = self._filter_by_regime(symbol, signals)
                 aggregated = self._aggregate_signals(symbol, signals)
-                if aggregated and abs(aggregated.strength) > 0.3:
+                if aggregated and abs(aggregated.strength) > self.MIN_SIGNAL_STRENGTH:
                     # Send to risk management before execution
                     await self.message_bus.publish(Message(
                         type=MessageType.ORDER_REQUEST,
@@ -246,7 +251,7 @@ class Orchestrator:
             # Apply regime filter before aggregation
             signals = self._filter_by_regime(symbol, signals)
             aggregated = self._aggregate_signals(symbol, signals)
-            if aggregated and abs(aggregated.strength) > 0.3:
+            if aggregated and abs(aggregated.strength) > self.MIN_SIGNAL_STRENGTH:
                 await self.message_bus.publish(Message(
                     type=MessageType.ORDER_REQUEST,
                     channel="risk_check",
@@ -265,7 +270,7 @@ class Orchestrator:
     def _aggregate_signals(self, symbol: str, signals: list[dict]) -> AggregatedSignal | None:
         """
         Weighted voting: each agent's signal is weighted by its confidence.
-        This allows high-performing agents to have more influence.
+        Requires minimum confluence (agents agreeing on direction) to act.
         """
         if not signals:
             return None
@@ -273,16 +278,22 @@ class Orchestrator:
         weighted_sum = 0.0
         total_weight = 0.0
         contributors = []
+        long_count = 0
+        short_count = 0
 
         for sig in signals:
             agent = self.registry.get(sig["sender"])
             agent_confidence = agent.confidence if agent else 0.5
 
-            # Weight = agent's historical confidence * signal confidence
             weight = agent_confidence * sig["confidence"]
             direction_value = 1.0 if sig["direction"] == "long" else (-1.0 if sig["direction"] == "short" else 0.0)
             weighted_sum += direction_value * sig["strength"] * weight
             total_weight += weight
+
+            if sig["direction"] == "long":
+                long_count += 1
+            elif sig["direction"] == "short":
+                short_count += 1
 
             if agent:
                 contributors.append(agent.name)
@@ -292,6 +303,11 @@ class Orchestrator:
 
         net_strength = weighted_sum / total_weight
         direction = "long" if net_strength > 0 else ("short" if net_strength < 0 else "neutral")
+
+        # Confluence check: require minimum agents agreeing on the consensus direction
+        majority_count = long_count if direction == "long" else short_count
+        if majority_count < self.MIN_CONFLUENCE_AGENTS:
+            return None
 
         return AggregatedSignal(
             symbol=symbol,

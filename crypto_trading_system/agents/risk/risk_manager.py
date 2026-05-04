@@ -42,6 +42,12 @@ class PositionSizingAgent(Agent):
         self._avg_win = 1.0
         self._avg_loss = 1.0
         self._trade_history: list[dict] = []
+        # Consecutive loss circuit breaker
+        self._consecutive_losses = 0
+        self._cooldown_remaining = 0  # Skip this many signals after streak
+        self.LOSS_STREAK_REDUCE = 3   # Halve size after 3 consecutive losses
+        self.LOSS_STREAK_PAUSE = 5    # Pause trading after 5 consecutive losses
+        self.PAUSE_DURATION = 3       # Skip 3 signals during pause
 
     async def on_start(self):
         await self.subscribe("risk_check")
@@ -67,6 +73,11 @@ class PositionSizingAgent(Agent):
         if direction == "neutral":
             return None
 
+        # Circuit breaker: skip signals during cooldown after loss streak
+        if self._cooldown_remaining > 0:
+            self._cooldown_remaining -= 1
+            return {"action": "reject", "reason": "loss_streak_cooldown"}
+
         # Check portfolio-level risk limit
         if self._open_risk >= self.max_portfolio_risk * self.account_balance:
             await self.emit(
@@ -88,6 +99,10 @@ class PositionSizingAgent(Agent):
 
         # Scale by signal strength and confidence
         position_fraction *= strength * confidence
+
+        # Adaptive sizing: reduce after consecutive losses
+        if self._consecutive_losses >= self.LOSS_STREAK_REDUCE:
+            position_fraction *= 0.5
 
         position_size_usd = self.account_balance * position_fraction
 
@@ -130,6 +145,15 @@ class PositionSizingAgent(Agent):
             "timestamp": time.time(),
             "balance": self.account_balance,
         })
+
+        # Track consecutive losses for circuit breaker
+        if pnl < 0:
+            self._consecutive_losses += 1
+            if self._consecutive_losses >= self.LOSS_STREAK_PAUSE:
+                self._cooldown_remaining = self.PAUSE_DURATION
+        else:
+            self._consecutive_losses = 0
+
         # Update win rate
         wins = sum(1 for t in self._trade_history if t["pnl"] > 0)
         total = len(self._trade_history)

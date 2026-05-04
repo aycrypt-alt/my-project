@@ -88,6 +88,11 @@ class BacktestEngine:
     ATR_SL_MULT = 2.0  # Stop-loss at 2x ATR
     ATR_TP_MULT = 3.0  # Take-profit at 3x ATR (1.5:1 reward/risk)
     ATR_PERIOD = 14
+    # Trailing stop: activate at 1x ATR profit, trail at 1.5x ATR behind price
+    TRAIL_ACTIVATE_MULT = 1.0  # Activate trailing stop after 1x ATR profit
+    TRAIL_DISTANCE_MULT = 1.5  # Trail 1.5x ATR behind price
+    # Partial profit-taking: close half at 50% of TP distance
+    PARTIAL_TP_RATIO = 0.5  # Take partial at 50% of TP target
 
     def __init__(self, message_bus: MessageBus, initial_balance: float = 10000.0,
                  orchestrator=None, leverage: float = 1.0):
@@ -254,22 +259,70 @@ class BacktestEngine:
             "direction": direction,
             "entry_price": entry_price,
             "size_usd": size_usd,
+            "original_size_usd": size_usd,
             "current_price": 0.0,
             "entry_time": time.time(),
             "contributing_agents": contributing,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
+            "trail_active": False,
+            "trail_stop": 0.0,
+            "partial_taken": False,
+            "atr_at_entry": current_atr,
         }
 
     def _mark_to_market(self, current_price: float):
-        """Update balance based on current positions, with leverage, ATR SL/TP, and fees."""
+        """Update balance with trailing stops, partial profit-taking, ATR SL/TP, and leverage."""
         liquidated = []
         sl_tp_closed = []
+        partial_closes = []
 
         for sym, pos in self._open_positions.items():
-            # Check ATR-based stop-loss and take-profit
+            entry = pos["entry_price"]
+            atr = pos.get("atr_at_entry", 0)
             sl = pos.get("stop_loss", 0)
             tp = pos.get("take_profit", 0)
+
+            # -- Trailing stop logic --
+            if atr > 0 and not pos.get("trail_active"):
+                if pos["direction"] == "long":
+                    profit_distance = current_price - entry
+                else:
+                    profit_distance = entry - current_price
+                if profit_distance >= atr * self.TRAIL_ACTIVATE_MULT:
+                    pos["trail_active"] = True
+                    if pos["direction"] == "long":
+                        pos["trail_stop"] = current_price - atr * self.TRAIL_DISTANCE_MULT
+                    else:
+                        pos["trail_stop"] = current_price + atr * self.TRAIL_DISTANCE_MULT
+
+            if pos.get("trail_active"):
+                if pos["direction"] == "long":
+                    new_trail = current_price - atr * self.TRAIL_DISTANCE_MULT
+                    if new_trail > pos["trail_stop"]:
+                        pos["trail_stop"] = new_trail
+                    pos["stop_loss"] = max(sl, pos["trail_stop"])
+                else:
+                    new_trail = current_price + atr * self.TRAIL_DISTANCE_MULT
+                    if new_trail < pos["trail_stop"]:
+                        pos["trail_stop"] = new_trail
+                    pos["stop_loss"] = min(sl, pos["trail_stop"]) if sl > 0 else pos["trail_stop"]
+                sl = pos["stop_loss"]
+
+            # -- Partial profit-taking --
+            if not pos.get("partial_taken") and tp > 0 and entry > 0:
+                if pos["direction"] == "long":
+                    partial_target = entry + (tp - entry) * self.PARTIAL_TP_RATIO
+                    if current_price >= partial_target:
+                        partial_closes.append(sym)
+                        pos["partial_taken"] = True
+                else:
+                    partial_target = entry - (entry - tp) * self.PARTIAL_TP_RATIO
+                    if current_price <= partial_target:
+                        partial_closes.append(sym)
+                        pos["partial_taken"] = True
+
+            # -- Check SL/TP exits --
             if sl > 0 and tp > 0:
                 if pos["direction"] == "long":
                     if current_price <= sl:
@@ -278,7 +331,7 @@ class BacktestEngine:
                     elif current_price >= tp:
                         sl_tp_closed.append((sym, tp, "take_profit"))
                         continue
-                else:  # short
+                else:
                     if current_price >= sl:
                         sl_tp_closed.append((sym, sl, "stop_loss"))
                         continue
@@ -294,18 +347,37 @@ class BacktestEngine:
                     pnl = (prev - current_price) / prev * pos["size_usd"] * self.leverage
                 self.balance += pnl
 
-                # Liquidation check: if unrealized loss exceeds margin (position value / leverage)
-                entry = pos["entry_price"]
                 if entry > 0:
                     if pos["direction"] == "long":
                         total_pnl_pct = (current_price - entry) / entry
                     else:
                         total_pnl_pct = (entry - current_price) / entry
-                    # Liquidation threshold: lose 100% of margin (1/leverage of position)
-                    if total_pnl_pct * self.leverage <= -0.95:  # 95% margin loss = liquidation
+                    if total_pnl_pct * self.leverage <= -0.95:
                         liquidated.append(sym)
 
             pos["current_price"] = current_price
+
+        # Process partial profit-taking: close half the position
+        for sym in partial_closes:
+            if sym in self._open_positions and sym not in [s for s, _, _ in sl_tp_closed]:
+                pos = self._open_positions[sym]
+                half_size = pos["size_usd"] * 0.5
+                if pos["direction"] == "long":
+                    pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * half_size * self.leverage
+                else:
+                    pnl = (pos["entry_price"] - current_price) / pos["entry_price"] * half_size * self.leverage
+                exit_fee = half_size * self.FEE_RATE
+                pnl -= exit_fee
+                self._total_fees += exit_fee
+                self.balance += pnl
+                pos["size_usd"] -= half_size
+                self.trades.append(BacktestTrade(
+                    symbol=sym, direction=pos["direction"],
+                    entry_price=pos["entry_price"], exit_price=current_price,
+                    size_usd=half_size, pnl=pnl,
+                    entry_time=pos["entry_time"], exit_time=time.time(),
+                    contributing_agents=pos.get("contributing_agents", []),
+                ))
 
         # Process ATR-based SL/TP exits
         for sym, exit_price, reason in sl_tp_closed:
@@ -316,7 +388,6 @@ class BacktestEngine:
             pos = self._open_positions.pop(sym, None)
             if pos:
                 self._liquidations += 1
-                # Liquidation: lose the full margin (position_size)
                 liq_loss = -pos["size_usd"]
                 self.balance += liq_loss
                 self.trades.append(BacktestTrade(
