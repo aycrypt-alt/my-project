@@ -64,7 +64,7 @@ class PositionSizingAgent(Agent):
         return None
 
     async def _evaluate_order(self, message: Message) -> dict | None:
-        """Evaluate an order request and determine position size."""
+        """Evaluate order request and size position by risk budget / stop distance."""
         symbol = message.payload.get("symbol", "")
         direction = message.payload.get("direction", "neutral")
         strength = message.payload.get("strength", 0.0)
@@ -88,31 +88,36 @@ class PositionSizingAgent(Agent):
             )
             return {"action": "reject", "reason": "portfolio_risk_limit"}
 
-        # Kelly Criterion
+        # Risk-budgeted sizing: position_size = risk_budget / stop_distance
+        # Backtester uses 2*ATR stops; ATR averages ~1-1.5% of price for crypto on 15m candles
+        # Assume stop_distance ~3% of price as default
+        risk_budget = self.account_balance * self.max_risk_per_trade
+        assumed_stop_pct = 0.03  # 3% stop distance assumption
+        base_position = risk_budget / assumed_stop_pct
+
+        # Apply Kelly fraction as a multiplier on base position (0.5-1.0 typical range)
         kelly_fraction = self._kelly_criterion()
+        kelly_multiplier = max(0.3, min(1.0, kelly_fraction / self.max_risk_per_trade))
 
-        # Conservative: use half-Kelly
-        position_fraction = kelly_fraction * 0.5
+        # Confidence scaling (signal already passed strength threshold in orchestrator)
+        confidence_mult = max(0.5, confidence)
 
-        # Cap at max risk per trade
-        position_fraction = min(position_fraction, self.max_risk_per_trade)
-
-        # Scale by signal strength and confidence
-        position_fraction *= strength * confidence
+        position_size_usd = base_position * kelly_multiplier * confidence_mult
 
         # Adaptive sizing: reduce after consecutive losses
         if self._consecutive_losses >= self.LOSS_STREAK_REDUCE:
-            position_fraction *= 0.5
+            position_size_usd *= 0.5
 
-        position_size_usd = self.account_balance * position_fraction
+        # Hard cap at 25% of balance per single position
+        position_size_usd = min(position_size_usd, self.account_balance * 0.25)
 
         order = {
             "symbol": symbol,
             "direction": direction,
             "size_usd": round(position_size_usd, 2),
-            "position_fraction": round(position_fraction, 4),
+            "position_fraction": round(position_size_usd / self.account_balance, 4),
             "kelly_fraction": round(kelly_fraction, 4),
-            "risk_amount": round(position_size_usd * self.max_risk_per_trade, 2),
+            "risk_amount": round(risk_budget, 2),
         }
 
         await self.emit(
