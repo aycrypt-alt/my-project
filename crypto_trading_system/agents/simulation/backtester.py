@@ -85,14 +85,15 @@ class BacktestEngine:
     # Transaction cost per side (Bybit maker fee)
     FEE_RATE = 0.00075  # 0.075%
     # ATR-based stop-loss/take-profit multipliers
-    ATR_SL_MULT = 2.0  # Stop-loss at 2x ATR
-    ATR_TP_MULT = 3.0  # Take-profit at 3x ATR (1.5:1 reward/risk)
+    ATR_SL_MULT = 2.0   # Stop-loss at 2x ATR
+    ATR_TP_MULT = 4.0   # Take-profit at 4x ATR (2:1 reward/risk)
     ATR_PERIOD = 14
-    # Trailing stop: activate at 1x ATR profit, trail at 1.5x ATR behind price
-    TRAIL_ACTIVATE_MULT = 1.0  # Activate trailing stop after 1x ATR profit
-    TRAIL_DISTANCE_MULT = 1.5  # Trail 1.5x ATR behind price
-    # Partial profit-taking: close half at 50% of TP distance
-    PARTIAL_TP_RATIO = 0.5  # Take partial at 50% of TP target
+    # Trailing stop: activate at 1.5x ATR profit, trail at 1x ATR behind price
+    TRAIL_ACTIVATE_MULT = 1.5  # Activate trailing stop after 1.5x ATR profit
+    TRAIL_DISTANCE_MULT = 1.0  # Trail 1x ATR behind price
+    # Partial profit-taking: close 1/3 at 60% of TP distance
+    PARTIAL_TP_RATIO = 0.6     # Take partial at 60% of TP target
+    PARTIAL_TP_FRACTION = 0.33 # Close 1/3 (not half) of position
 
     def __init__(self, message_bus: MessageBus, initial_balance: float = 10000.0,
                  orchestrator=None, leverage: float = 1.0):
@@ -283,7 +284,7 @@ class BacktestEngine:
             sl = pos.get("stop_loss", 0)
             tp = pos.get("take_profit", 0)
 
-            # -- Trailing stop logic --
+            # -- Trailing stop logic (never goes below breakeven) --
             if atr > 0 and not pos.get("trail_active"):
                 if pos["direction"] == "long":
                     profit_distance = current_price - entry
@@ -292,18 +293,18 @@ class BacktestEngine:
                 if profit_distance >= atr * self.TRAIL_ACTIVATE_MULT:
                     pos["trail_active"] = True
                     if pos["direction"] == "long":
-                        pos["trail_stop"] = current_price - atr * self.TRAIL_DISTANCE_MULT
+                        pos["trail_stop"] = max(entry, current_price - atr * self.TRAIL_DISTANCE_MULT)
                     else:
-                        pos["trail_stop"] = current_price + atr * self.TRAIL_DISTANCE_MULT
+                        pos["trail_stop"] = min(entry, current_price + atr * self.TRAIL_DISTANCE_MULT)
 
             if pos.get("trail_active"):
                 if pos["direction"] == "long":
-                    new_trail = current_price - atr * self.TRAIL_DISTANCE_MULT
+                    new_trail = max(entry, current_price - atr * self.TRAIL_DISTANCE_MULT)
                     if new_trail > pos["trail_stop"]:
                         pos["trail_stop"] = new_trail
                     pos["stop_loss"] = max(sl, pos["trail_stop"])
                 else:
-                    new_trail = current_price + atr * self.TRAIL_DISTANCE_MULT
+                    new_trail = min(entry, current_price + atr * self.TRAIL_DISTANCE_MULT)
                     if new_trail < pos["trail_stop"]:
                         pos["trail_stop"] = new_trail
                     pos["stop_loss"] = min(sl, pos["trail_stop"]) if sl > 0 else pos["trail_stop"]
@@ -357,11 +358,11 @@ class BacktestEngine:
 
             pos["current_price"] = current_price
 
-        # Process partial profit-taking: close half the position
+        # Process partial profit-taking: close a fraction of the position
         for sym in partial_closes:
             if sym in self._open_positions and sym not in [s for s, _, _ in sl_tp_closed]:
                 pos = self._open_positions[sym]
-                half_size = pos["size_usd"] * 0.5
+                half_size = pos["size_usd"] * self.PARTIAL_TP_FRACTION
                 if pos["direction"] == "long":
                     pnl = (current_price - pos["entry_price"]) / pos["entry_price"] * half_size * self.leverage
                 else:

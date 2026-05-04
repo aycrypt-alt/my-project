@@ -295,50 +295,89 @@ async def run_live(symbols: list[str], testnet: bool = True):
         await exchange.close()
 
 
-async def run_backtest(symbols: list[str]):
-    """Run backtest with synthetic data (replace with real historical data)."""
-    import math
-    import random
+async def run_backtest(symbols: list[str], use_real_data: bool = False, leverage: float = 1.0):
+    """Run backtest with real Bybit data or synthetic data."""
+    backtest_symbols = symbols[:3]
 
-    message_bus = MessageBus()
-    registry = AgentRegistry()
-    create_agents(message_bus, registry, symbols[:3])  # Backtest with fewer symbols
+    if use_real_data:
+        print("\n  Fetching real historical data from Bybit...")
+        fetcher = HistoricalDataFetcher()
+        try:
+            historical_data = await fetcher.fetch_multi_symbol(
+                backtest_symbols, interval="15", num_candles=5000
+            )
+        finally:
+            await fetcher.close()
+        if not any(historical_data.values()):
+            print("  Failed to fetch real data, falling back to synthetic...")
+            use_real_data = False
 
-    executor = OrderExecutorAgent(message_bus, config={"stop_loss_pct": 0.02, "take_profit_pct": 0.04})
-    registry.register(executor, "execution")
+    if not use_real_data:
+        print("\n  Generating synthetic historical data...")
+        historical_data = {}
+        prices = {"BTCUSDT": 50000, "ETHUSDT": 3000, "SOLUSDT": 100}
+        for sym in backtest_symbols:
+            start_price = prices.get(sym, 100)
+            historical_data[sym] = generate_synthetic_data(sym, num_candles=5000, start_price=start_price)
 
-    orchestrator = Orchestrator(message_bus, registry)
+    lev_str = f" (leverage: {leverage:.0f}x)" if leverage > 1 else ""
+    print(f"\n  Running backtest across {len(backtest_symbols)} symbols{lev_str}...")
 
-    # Generate synthetic price data (replace with real data from Bybit API)
-    logger.info("Generating synthetic data for backtest...")
-    historical = generate_synthetic_data("BTCUSDT", num_candles=5000)
+    all_trades = []
+    all_equity = []
+    total_balance = 0.0
+    per_symbol_balance = 10000.0 / len(backtest_symbols)
 
-    # Run backtest
-    engine = BacktestEngine(message_bus, initial_balance=10000.0, orchestrator=orchestrator)
-    await orchestrator.start()
-    result = await engine.run(historical, "BTCUSDT")
-    await orchestrator.stop()
+    for sym in backtest_symbols:
+        if sym not in historical_data or not historical_data[sym]:
+            continue
 
-    # Print results
+        message_bus = MessageBus()
+        registry = AgentRegistry()
+        create_agents(message_bus, registry, [sym])
+
+        executor = OrderExecutorAgent(message_bus, config={"stop_loss_pct": 0.02, "take_profit_pct": 0.04})
+        registry.register(executor, "execution")
+
+        orchestrator = Orchestrator(message_bus, registry)
+        engine = BacktestEngine(message_bus, initial_balance=per_symbol_balance,
+                                orchestrator=orchestrator, leverage=leverage)
+
+        await orchestrator.start()
+        result = await engine.run(historical_data[sym], sym)
+        await orchestrator.stop()
+
+        all_trades.extend(result.trades)
+        total_balance += result.final_balance
+        print(f"    {sym}: {result.total_return_pct:+.2f}% | {result.total_trades} trades | "
+              f"Win rate: {result.win_rate:.1f}%")
+
+    # Aggregate results
+    pnls = [t.pnl for t in all_trades]
+    wins = [p for p in pnls if p > 0]
+    losses = [abs(p) for p in pnls if p < 0]
+    total_return = (total_balance - 10000.0) / 10000.0 * 100
+
     print("\n" + "=" * 60)
-    print("  BACKTEST RESULTS")
+    print("  BACKTEST RESULTS (PORTFOLIO)")
     print("=" * 60)
-    print(f"  Total Return:    {result.total_return_pct:>8.2f}%")
-    print(f"  Sharpe Ratio:    {result.sharpe_ratio:>8.2f}")
-    print(f"  Sortino Ratio:   {result.sortino_ratio:>8.2f}")
-    print(f"  Max Drawdown:    {result.max_drawdown_pct:>8.2f}%")
-    print(f"  Total Trades:    {result.total_trades:>8d}")
-    print(f"  Win Rate:        {result.win_rate:>8.1f}%")
-    print(f"  Profit Factor:   {result.profit_factor:>8.2f}")
-    print(f"  Avg Trade PnL:  ${result.avg_trade_pnl:>8.2f}")
-    print(f"  Best Trade:     ${result.best_trade:>8.2f}")
-    print(f"  Worst Trade:    ${result.worst_trade:>8.2f}")
+    print(f"  Data Source:     {'Real Bybit' if use_real_data else 'Synthetic':>16s}")
+    print(f"  Leverage:        {leverage:>15.0f}x")
+    print(f"  Total Return:    {total_return:>8.2f}%")
+    print(f"  Final Balance:   ${total_balance:>10.2f}")
+    print(f"  Total Trades:    {len(all_trades):>8d}")
+    print(f"  Win Rate:        {len(wins) / len(pnls) * 100 if pnls else 0:>8.1f}%")
+    pf = round(sum(wins) / sum(losses), 2) if losses and sum(losses) > 0 else 0.0
+    print(f"  Profit Factor:   {pf:>8.2f}")
+    print(f"  Avg Trade PnL:  ${sum(pnls) / len(pnls) if pnls else 0:>8.2f}")
+    print(f"  Best Trade:     ${max(pnls) if pnls else 0:>8.2f}")
+    print(f"  Worst Trade:    ${min(pnls) if pnls else 0:>8.2f}")
     print("=" * 60)
 
     # Monte Carlo
-    if result.trades:
+    if all_trades:
         print("\n  Running Monte Carlo simulation (1000 iterations)...")
-        mc = MonteCarloSimulator(result.trades, initial_balance=10000.0)
+        mc = MonteCarloSimulator(all_trades, initial_balance=10000.0)
         mc_result = mc.run(1000)
         print(f"  MC Mean Return:       {mc_result['return_mean']:>8.2f}%")
         print(f"  MC 5th Percentile:    {mc_result['return_5th_pct']:>8.2f}%")
@@ -464,7 +503,7 @@ def main():
     parser.add_argument("--symbols", nargs="+", default=None,
                         help="Trading symbols (default: top 20)")
     parser.add_argument("--use-real-data", action="store_true",
-                        help="Fetch real historical data from Bybit (optimize mode)")
+                        help="Fetch real historical data from Bybit (backtest & optimize modes)")
     parser.add_argument("--grid-search", action="store_true",
                         help="Run parameter grid search (optimize mode)")
     parser.add_argument("--leverage", type=float, default=1.0,
@@ -474,7 +513,7 @@ def main():
     symbols = args.symbols or TRADING_SYMBOLS
 
     if args.mode == "backtest":
-        asyncio.run(run_backtest(symbols))
+        asyncio.run(run_backtest(symbols, use_real_data=args.use_real_data, leverage=args.leverage))
     elif args.mode == "optimize":
         asyncio.run(run_optimize(symbols, use_real_data=args.use_real_data,
                                  grid_search=args.grid_search, leverage=args.leverage))
